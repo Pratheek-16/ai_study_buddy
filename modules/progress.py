@@ -1,66 +1,81 @@
 import json
-import os
 from datetime import datetime, timedelta
 
-
-PROGRESS_FILE = "progress.json"
-ACTIVITY_FILE = "activity.json"
+from modules.db import get_connection
 
 
-def load_progress() -> list:
-    """
-    Loads all saved quiz attempts from progress.json.
-    Returns a list of attempt dicts.
-    """
-    if not os.path.exists(PROGRESS_FILE):
-        return []
+def load_progress(username: str) -> list:
     try:
-        with open(PROGRESS_FILE, "r") as f:
-            return json.load(f)
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT topic, score, total, percentage, passed, wrong_questions, date, time
+            FROM progress
+            WHERE username = %s
+            ORDER BY id ASC
+            """,
+            (username,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
     except Exception:
         return []
 
+    attempts = []
+    for topic, score, total, percentage, passed, wrong_questions, date, time in rows:
+        attempts.append({
+            "date": date,
+            "time": time,
+            "topic": topic,
+            "score": score,
+            "total": total,
+            "percentage": float(percentage),
+            "passed": bool(passed),
+            "wrong_questions": json.loads(wrong_questions) if wrong_questions else []
+        })
+    return attempts
 
-def save_attempt(topic: str, score: int, total: int, wrong_questions: list):
-    """
-    Saves a single quiz attempt to progress.json.
-    wrong_questions is a list of question strings the user got wrong.
-    """
-    attempts = load_progress()
 
-    attempt = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "time": datetime.now().strftime("%H:%M"),
-        "topic": topic,
-        "score": score,
-        "total": total,
-        "percentage": round((score / total) * 100, 1),
-        "passed": (score / total) >= 0.6,
-        "wrong_questions": wrong_questions
-    }
-
-    attempts.append(attempt)
+def save_attempt(username: str, topic: str, score: int, total: int, wrong_questions: list):
+    percentage = round((score / total) * 100, 1)
+    passed = (score / total) >= 0.6
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    time_str = datetime.now().strftime("%H:%M")
 
     try:
-        with open(PROGRESS_FILE, "w") as f:
-            json.dump(attempts, f, indent=2)
-    except Exception as e:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO progress
+                (username, topic, score, total, percentage, passed, wrong_questions, date, time)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (username, topic, score, total, percentage, passed,
+             json.dumps(wrong_questions), date_str, time_str)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
         pass
 
 
-def delete_all_progress():
-    """
-    Clears all saved progress by deleting the JSON file.
-    """
-    if os.path.exists(PROGRESS_FILE):
-        os.remove(PROGRESS_FILE)
+def delete_all_progress(username: str):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM progress WHERE username = %s", (username,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
 
 
 def get_topic_stats(attempts: list) -> dict:
-    """
-    Groups attempts by topic and computes per-topic stats.
-    Returns a dict: { topic: { attempts, avg_score, best_score, last_date } }
-    """
     stats = {}
 
     for a in attempts:
@@ -86,9 +101,6 @@ def get_topic_stats(attempts: list) -> dict:
 
 
 def get_overall_stats(attempts: list) -> dict:
-    """
-    Returns overall summary stats across all attempts.
-    """
     if not attempts:
         return {}
 
@@ -109,62 +121,46 @@ def get_overall_stats(attempts: list) -> dict:
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# STUDY STREAK TRACKING
-# ══════════════════════════════════════════════════════════════════════════
-# A "study day" is any day the user used ANY feature: explainer, summarizer,
-# quiz, or flashcards. This is tracked separately from quiz scores so the
-# streak reflects general engagement, not just quiz-taking.
-
-def log_activity(feature: str):
-    """
-    Logs that the user used a feature today.
-    feature: one of "explain", "summarize", "quiz", "flashcards"
-    Only stores one entry per day per feature (no duplicate spam on reruns).
-    """
+def log_activity(username: str, feature: str):
     today = datetime.now().strftime("%Y-%m-%d")
 
-    if not os.path.exists(ACTIVITY_FILE):
-        log = []
-    else:
-        try:
-            with open(ACTIVITY_FILE, "r") as f:
-                log = json.load(f)
-        except Exception:
-            log = []
-
-    # Avoid duplicate entries for the same feature on the same day
-    already_logged = any(entry["date"] == today and entry["feature"] == feature for entry in log)
-    if not already_logged:
-        log.append({"date": today, "feature": feature})
-        try:
-            with open(ACTIVITY_FILE, "w") as f:
-                json.dump(log, f, indent=2)
-        except Exception:
-            pass
-
-
-def get_study_dates() -> set:
-    """
-    Returns a set of unique date strings ("YYYY-MM-DD") on which
-    the user did at least one study activity.
-    """
-    if not os.path.exists(ACTIVITY_FILE):
-        return set()
     try:
-        with open(ACTIVITY_FILE, "r") as f:
-            log = json.load(f)
-        return set(entry["date"] for entry in log)
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM activity WHERE username = %s AND date = %s AND feature = %s",
+            (username, today, feature)
+        )
+        already_logged = cur.fetchone() is not None
+
+        if not already_logged:
+            cur.execute(
+                "INSERT INTO activity (username, date, feature) VALUES (%s, %s, %s)",
+                (username, today, feature)
+            )
+            conn.commit()
+
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_study_dates(username: str) -> set:
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT date FROM activity WHERE username = %s", (username,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return set(r[0] for r in rows)
     except Exception:
         return set()
 
 
-def get_streak_stats() -> dict:
-    """
-    Computes current streak, longest streak ever, and total active days.
-    A streak is broken if there's a gap of more than 1 day between study days.
-    """
-    dates_str = get_study_dates()
+def get_streak_stats(username: str) -> dict:
+    dates_str = get_study_dates(username)
 
     if not dates_str:
         return {
@@ -178,7 +174,6 @@ def get_streak_stats() -> dict:
     today = datetime.now().date()
     studied_today = today in dates
 
-    # ── Longest streak ever (scan all dates for consecutive runs) ──────────
     longest_streak = 1
     run = 1
     for i in range(1, len(dates)):
@@ -188,12 +183,10 @@ def get_streak_stats() -> dict:
             run = 1
         longest_streak = max(longest_streak, run)
 
-    # ── Current streak (count backwards from today or yesterday) ───────────
     current_streak = 0
     cursor = today if studied_today else today - timedelta(days=1)
 
     if cursor in dates or (cursor == today and (today - timedelta(days=1)) in dates):
-        # Walk backwards day by day while consecutive days exist in the set
         check_date = today if studied_today else today - timedelta(days=1)
         date_set = set(dates)
         while check_date in date_set:
@@ -210,12 +203,8 @@ def get_streak_stats() -> dict:
     }
 
 
-def get_streak_calendar(days_back: int = 35) -> list:
-    """
-    Returns a list of dicts for the last `days_back` days, each with
-    {date, day_label, studied} — used to render a GitHub-style activity grid.
-    """
-    studied_dates = get_study_dates()
+def get_streak_calendar(username: str, days_back: int = 35) -> list:
+    studied_dates = get_study_dates(username)
     today = datetime.now().date()
 
     calendar = []

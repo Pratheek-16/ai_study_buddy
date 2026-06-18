@@ -13,6 +13,7 @@ from modules.progress import (
     log_activity, get_streak_stats, get_streak_calendar
 )
 from modules.styling import get_custom_css
+from modules.auth import signup, login
 
 # ── Load environment and configure Gemini ─────────────────────────────────────
 load_dotenv()
@@ -33,6 +34,53 @@ st.set_page_config(
 )
 
 st.markdown(get_custom_css(), unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGIN / SIGNUP GATE — nothing below this runs until the user is logged in
+# ══════════════════════════════════════════════════════════════════════════════
+if "username" not in st.session_state:
+    st.session_state["username"] = None
+
+if not st.session_state["username"]:
+    st.markdown(
+        """
+        <div class="page-hero">
+            <span class="eyebrow">Welcome</span>
+            <h1>Study Buddy</h1>
+            <div class="subtitle">Log in or create an account to track your own progress.</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    tab_login, tab_signup = st.tabs(["Log In", "Sign Up"])
+
+    with tab_login:
+        login_username = st.text_input("Username", key="login_username")
+        login_password = st.text_input("Password", type="password", key="login_password")
+        if st.button("Log In", type="primary"):
+            ok, message = login(login_username, login_password)
+            if ok:
+                st.session_state["username"] = login_username.strip()
+                st.rerun()
+            else:
+                st.error(message)
+
+    with tab_signup:
+        signup_username = st.text_input("Choose a username", key="signup_username")
+        signup_password = st.text_input("Choose a password", type="password", key="signup_password")
+        if st.button("Create Account", type="primary"):
+            ok, message = signup(signup_username, signup_password)
+            if ok:
+                st.success(message + " Switch to the Log In tab to continue.")
+            else:
+                st.error(message)
+
+    st.stop()
+
+# From here on, the user is logged in.
+username = st.session_state["username"]
 
 
 def hero(eyebrow: str, title: str, subtitle: str):
@@ -78,8 +126,14 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
+st.sidebar.markdown(f"Logged in as **{username}**")
+if st.sidebar.button("Log Out"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
 # Mini streak badge — quick glance, full detail lives in Progress Tracker
-_streak = get_streak_stats()
+_streak = get_streak_stats(username)
 _flame_class = "" if _streak["current_streak"] > 0 else "cold"
 _streak_word = "day" if _streak["current_streak"] == 1 else "days"
 st.sidebar.markdown(
@@ -130,7 +184,7 @@ if page == "💡 Explain a Concept":
         else:
             with st.spinner(f"Generating explanation for '{topic}'..."):
                 result = explain_concept(topic, level.lower(), client, MODEL)
-            log_activity("explain")
+            log_activity(username, "explain")
             st.markdown(f'<div class="notebook-page">{result}</div>', unsafe_allow_html=True)
 
 
@@ -157,7 +211,7 @@ elif page == "📄 Summarize Notes":
                 else:
                     result = summarize_notes(text, client, MODEL)
             if not text.startswith("Error") and text.strip():
-                log_activity("summarize")
+                log_activity(username, "summarize")
                 st.markdown(f'<div class="notebook-page">{result}</div>', unsafe_allow_html=True)
 
                 with st.expander("View extracted raw text"):
@@ -183,7 +237,7 @@ elif page == "🧠 Generate Quiz":
             if not questions:
                 st.error("Failed to generate quiz. Please try again.")
             else:
-                log_activity("quiz")
+                log_activity(username, "quiz")
                 st.session_state["quiz_questions"] = questions
                 st.session_state["quiz_answers"] = {}
                 st.session_state["quiz_submitted"] = False
@@ -230,6 +284,7 @@ elif page == "🧠 Generate Quiz":
         if not st.session_state.get("progress_saved", False):
             wrong_qs = [r["question"] for r in results["results"] if not r["is_correct"]]
             save_attempt(
+                username=username,
                 topic=st.session_state.get("quiz_topic", "Unknown"),
                 score=score,
                 total=total,
@@ -279,7 +334,7 @@ elif page == "🃏 Flashcards":
                 if not cards:
                     st.error("Failed to generate flashcards. Please try again.")
                 else:
-                    log_activity("flashcards")
+                    log_activity(username, "flashcards")
                     st.session_state["flashcards"] = cards
                     st.session_state["card_index"] = 0
                     st.session_state["show_back"] = False
@@ -293,7 +348,7 @@ elif page == "🃏 Flashcards":
             if not cards:
                 st.error("Failed to generate flashcards. Please try again.")
             else:
-                log_activity("flashcards")
+                log_activity(username, "flashcards")
                 st.session_state["flashcards"] = cards
                 st.session_state["card_index"] = 0
                 st.session_state["show_back"] = False
@@ -361,7 +416,7 @@ elif page == "📊 Progress Tracker":
     hero("Your journey", "Progress Tracker", "Track your quiz performance over time across all topics.")
 
     # ── Study Streak Section ────────────────────────────────────────────────
-    streak = get_streak_stats()
+    streak = get_streak_stats(username)
     flame_class = "" if streak["current_streak"] > 0 else "cold"
 
     if streak["current_streak"] == 0:
@@ -391,7 +446,7 @@ elif page == "📊 Progress Tracker":
     col_b.metric("Total Active Days", streak["total_active_days"])
 
     st.markdown("##### Last 35 Days")
-    calendar = get_streak_calendar(35)
+    calendar = get_streak_calendar(username, 35)
     cells_html = "".join(
         f'<div class="activity-cell {"studied" if c["studied"] else ""}" title="{c["day_label"]}"></div>'
         for c in calendar
@@ -409,7 +464,7 @@ elif page == "📊 Progress Tracker":
 
     st.markdown("---")
 
-    attempts = load_progress()
+    attempts = load_progress(username)
 
     if not attempts:
         st.info("No quiz attempts yet. Go to **Generate Quiz**, take a quiz, and your results will appear here automatically.")
@@ -492,7 +547,7 @@ elif page == "📊 Progress Tracker":
             col_yes, col_no = st.columns(2)
             with col_yes:
                 if st.button("Yes, delete everything"):
-                    delete_all_progress()
+                    delete_all_progress(username)
                     st.session_state["confirm_delete"] = False
                     st.success("All progress deleted.")
                     st.rerun()
