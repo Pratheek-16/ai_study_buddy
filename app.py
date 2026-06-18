@@ -48,7 +48,7 @@ if not st.session_state["username"]:
         <div class="page-hero">
             <span class="eyebrow">Welcome</span>
             <h1>Study Buddy</h1>
-            <div class="subtitle">Log in or create an account to track your own progress.</div>
+            <div class="subtitle">Log in or create an account through sign up  to track your own progress.</div>
         </div>
         """,
         unsafe_allow_html=True
