@@ -14,6 +14,8 @@ from modules.progress import (
 )
 from modules.styling import get_custom_css
 from modules.auth import signup, login
+from modules.resume_reviewer import review_resume
+from modules.resume_builder import polish_bullets, generate_resume_pdf, generate_resume_docx
 
 # ── Load environment and configure Gemini ─────────────────────────────────────
 load_dotenv()
@@ -156,7 +158,9 @@ page = st.sidebar.radio(
         "📄 Summarize Notes",
         "🧠 Generate Quiz",
         "🃏 Flashcards",
-        "📊 Progress Tracker"
+        "📊 Progress Tracker",
+        "📝 Resume Reviewer",
+        "🏗️ Resume Builder",
     ],
     label_visibility="collapsed"
 )
@@ -555,3 +559,268 @@ elif page == "📊 Progress Tracker":
                 if st.button("Cancel"):
                     st.session_state["confirm_delete"] = False
                     st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 6 — Resume Reviewer
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "📝 Resume Reviewer":
+    hero("AI-Powered", "Resume Reviewer", "Upload your resume and get instant structured feedback with ATS compatibility check.")
+
+    uploaded = st.file_uploader("Upload your resume", type=["pdf", "docx"], help="PDF or Word document (.docx/.pdf)")
+
+    if uploaded:
+        st.success(f"Uploaded: {uploaded.name}")
+
+        if st.button("Analyse Resume", type="primary"):
+            from modules.summarizer import extract_text
+            with st.spinner("Gemini is reviewing your resume..."):
+                text = extract_text(uploaded)
+                if not text.strip() or text.startswith("Error"):
+                    st.error("Could not extract text. Make sure your PDF is not scanned/image-only.")
+                    st.stop()
+                result = review_resume(text, client, MODEL)
+
+            if "error" in result:
+                st.error(f"Review failed: {result['error']}")
+            else:
+                log_activity(username, "resume_review")
+
+                score = result.get("overall_score", 0)
+                color = "#9BC489" if score >= 7 else "#D4A24E" if score >= 5 else "#C16B5E"
+                st.markdown(
+                    f"""
+                    <div style="display:flex; align-items:center; gap:20px; padding:20px;
+                                background:var(--card); border-radius:12px; margin-bottom:20px;
+                                border:1px solid var(--line-deep);">
+                        <div style="font-size:3rem; font-weight:700; color:{color}; font-family:'Source Serif 4',serif;">
+                            {score}/10
+                        </div>
+                        <div>
+                            <div style="font-size:1rem; font-weight:600; color:var(--ink);">Overall Resume Score</div>
+                            <div style="color:var(--ink-soft); font-size:0.9rem; margin-top:4px;">
+                                {result.get("overall_summary", "")}
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                ats = result.get("ats_score", 0)
+                ats_color = "#9BC489" if ats >= 7 else "#D4A24E" if ats >= 5 else "#C16B5E"
+                st.markdown("### ATS Compatibility")
+                col_ats1, col_ats2 = st.columns([1, 3])
+                with col_ats1:
+                    st.markdown(f'<div style="font-size:2rem; font-weight:700; color:{ats_color};">{ats}/10</div>', unsafe_allow_html=True)
+                with col_ats2:
+                    issues = result.get("ats_issues", [])
+                    if issues:
+                        for issue in issues:
+                            st.markdown(f"- {issue}")
+                    else:
+                        st.success("No major ATS issues found!")
+
+                st.markdown("---")
+                st.markdown("### Section Feedback")
+                section_icons = {"summary": "Summary", "education": "Education", "experience": "Experience", "skills": "Skills", "projects": "Projects"}
+                sections = result.get("sections", {})
+                for key, label in section_icons.items():
+                    sec = sections.get(key, {})
+                    present = sec.get("present", False)
+                    sec_score = sec.get("score", 0)
+                    feedback = sec.get("feedback", "Not evaluated.")
+                    sec_color = "#9BC489" if sec_score >= 7 else "#D4A24E" if sec_score >= 5 else "#C16B5E"
+                    not_found = "" if present else " (not found)"
+                    with st.expander(f"{label}{not_found}  —  {sec_score}/10", expanded=True):
+                        st.markdown(f'<span style="color:{sec_color}; font-weight:600;">{sec_score}/10</span>', unsafe_allow_html=True)
+                        st.write(feedback)
+
+                st.markdown("---")
+                col_s, col_i = st.columns(2)
+                with col_s:
+                    st.markdown("### Strengths")
+                    for s in result.get("strengths", []):
+                        st.markdown(f'<div style="padding:10px 14px; background:rgba(155,196,137,0.12); border-left:3px solid var(--sage); border-radius:6px; margin-bottom:8px;">✅ {s}</div>', unsafe_allow_html=True)
+                with col_i:
+                    st.markdown("### Improvements")
+                    for imp in result.get("improvements", []):
+                        st.markdown(f'<div style="padding:10px 14px; background:rgba(193,107,94,0.12); border-left:3px solid var(--brick); border-radius:6px; margin-bottom:8px;">🔺 {imp}</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 7 — Resume Builder
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "🏗️ Resume Builder":
+    hero("AI-Assisted", "Resume Builder", "Fill in your details step by step — Gemini writes polished bullet points for you.")
+
+    if "rb_step" not in st.session_state:
+        st.session_state["rb_step"] = 1
+    if "rb_data" not in st.session_state:
+        st.session_state["rb_data"] = {}
+
+    step = st.session_state["rb_step"]
+    total_steps = 5
+
+    st.markdown(
+        f'<div style="margin-bottom:20px;"><div style="font-size:0.8rem; color:var(--ink-soft); margin-bottom:6px;">Step {step} of {total_steps}</div>'
+        f'<div style="background:var(--line); border-radius:4px; height:6px;">'
+        f'<div style="background:var(--amber); width:{int(step/total_steps*100)}%; height:6px; border-radius:4px;"></div></div></div>',
+        unsafe_allow_html=True
+    )
+
+    if step == 1:
+        st.markdown("### Personal Information")
+        p = st.session_state["rb_data"].get("personal", {})
+        name = st.text_input("Full Name *", value=p.get("name", ""))
+        email = st.text_input("Email *", value=p.get("email", ""))
+        phone = st.text_input("Phone", value=p.get("phone", ""))
+        location = st.text_input("Location", value=p.get("location", ""))
+        linkedin = st.text_input("LinkedIn URL (optional)", value=p.get("linkedin", ""))
+        summary_raw = st.text_area("Professional Summary (rough notes)", value=st.session_state["rb_data"].get("summary_raw", ""),
+            placeholder="e.g. Final year CS student, strong in Python and ML, built 3 projects")
+        if st.button("Next →", type="primary"):
+            if not name.strip() or not email.strip():
+                st.warning("Name and email are required.")
+            else:
+                st.session_state["rb_data"]["personal"] = {"name": name, "email": email, "phone": phone, "location": location, "linkedin": linkedin}
+                st.session_state["rb_data"]["summary_raw"] = summary_raw
+                st.session_state["rb_step"] = 2
+                st.rerun()
+
+    elif step == 2:
+        st.markdown("### Education")
+        edu_list = st.session_state["rb_data"].get("education", [{"degree":"","institution":"","year":"","gpa":""}])
+        updated_edu = []
+        for i, edu in enumerate(edu_list):
+            st.markdown(f"**Entry {i+1}**")
+            c1, c2 = st.columns(2)
+            degree = c1.text_input("Degree", value=edu.get("degree",""), key=f"deg_{i}")
+            institution = c2.text_input("Institution", value=edu.get("institution",""), key=f"inst_{i}")
+            c3, c4 = st.columns(2)
+            year = c3.text_input("Year / Duration", value=edu.get("year",""), key=f"yr_{i}")
+            gpa = c4.text_input("CGPA / GPA (optional)", value=edu.get("gpa",""), key=f"gpa_{i}")
+            updated_edu.append({"degree":degree,"institution":institution,"year":year,"gpa":gpa})
+            st.markdown("---")
+        col_add, col_back, col_next = st.columns(3)
+        if col_add.button("Add Another"):
+            updated_edu.append({"degree":"","institution":"","year":"","gpa":""})
+            st.session_state["rb_data"]["education"] = updated_edu
+            st.rerun()
+        if col_back.button("← Back"):
+            st.session_state["rb_data"]["education"] = updated_edu
+            st.session_state["rb_step"] = 1
+            st.rerun()
+        if col_next.button("Next →", type="primary"):
+            st.session_state["rb_data"]["education"] = updated_edu
+            st.session_state["rb_step"] = 3
+            st.rerun()
+
+    elif step == 3:
+        st.markdown("### Projects")
+        proj_list = st.session_state["rb_data"].get("projects_raw", [{"name":"","tech":"","desc":""}])
+        updated_proj = []
+        for i, proj in enumerate(proj_list):
+            st.markdown(f"**Project {i+1}**")
+            c1, c2 = st.columns(2)
+            pname = c1.text_input("Project Name", value=proj.get("name",""), key=f"pn_{i}")
+            tech = c2.text_input("Tech Stack", value=proj.get("tech",""), key=f"pt_{i}")
+            desc = st.text_area("What did you build?", value=proj.get("desc",""), key=f"pd_{i}")
+            updated_proj.append({"name":pname,"tech":tech,"desc":desc})
+            st.markdown("---")
+        col_add, col_back, col_next = st.columns(3)
+        if col_add.button("Add Project"):
+            updated_proj.append({"name":"","tech":"","desc":""})
+            st.session_state["rb_data"]["projects_raw"] = updated_proj
+            st.rerun()
+        if col_back.button("← Back"):
+            st.session_state["rb_data"]["projects_raw"] = updated_proj
+            st.session_state["rb_step"] = 2
+            st.rerun()
+        if col_next.button("Next →", type="primary"):
+            st.session_state["rb_data"]["projects_raw"] = updated_proj
+            st.session_state["rb_step"] = 4
+            st.rerun()
+
+    elif step == 4:
+        st.markdown("### Skills")
+        sk = st.session_state["rb_data"].get("skills_raw", {})
+        languages = st.text_input("Programming Languages (comma separated)", value=sk.get("languages",""), placeholder="Python, Java, JavaScript")
+        frameworks = st.text_input("Frameworks & Libraries", value=sk.get("frameworks",""), placeholder="React, TensorFlow, FastAPI")
+        tools = st.text_input("Tools & Platforms", value=sk.get("tools",""), placeholder="Git, Docker, AWS")
+        soft = st.text_input("Soft Skills (optional)", value=sk.get("soft",""))
+        st.markdown("### Experience (optional)")
+        exp_list = st.session_state["rb_data"].get("experience_raw", [])
+        updated_exp = []
+        for i, exp in enumerate(exp_list):
+            st.markdown(f"**Role {i+1}**")
+            c1, c2 = st.columns(2)
+            role = c1.text_input("Role", value=exp.get("role",""), key=f"er_{i}")
+            company = c2.text_input("Company", value=exp.get("company",""), key=f"ec_{i}")
+            duration = st.text_input("Duration", value=exp.get("duration",""), key=f"ed_{i}")
+            desc = st.text_area("What did you do?", value=exp.get("desc",""), key=f"edesc_{i}")
+            updated_exp.append({"role":role,"company":company,"duration":duration,"desc":desc})
+            st.markdown("---")
+        if st.button("Add Experience"):
+            updated_exp.append({"role":"","company":"","duration":"","desc":""})
+            st.session_state["rb_data"]["experience_raw"] = updated_exp
+            st.session_state["rb_data"]["skills_raw"] = {"languages":languages,"frameworks":frameworks,"tools":tools,"soft":soft}
+            st.rerun()
+        col_back, col_next = st.columns(2)
+        if col_back.button("← Back"):
+            st.session_state["rb_data"]["experience_raw"] = updated_exp
+            st.session_state["rb_data"]["skills_raw"] = {"languages":languages,"frameworks":frameworks,"tools":tools,"soft":soft}
+            st.session_state["rb_step"] = 3
+            st.rerun()
+        if col_next.button("Next →", type="primary"):
+            st.session_state["rb_data"]["experience_raw"] = updated_exp
+            st.session_state["rb_data"]["skills_raw"] = {"languages":languages,"frameworks":frameworks,"tools":tools,"soft":soft}
+            st.session_state["rb_step"] = 5
+            st.rerun()
+
+    elif step == 5:
+        st.markdown("### Generate Your Resume")
+        st.info("Gemini will now polish your bullet points and generate a downloadable PDF.")
+        d = st.session_state["rb_data"]
+        if st.button("Generate Resume PDF", type="primary"):
+            with st.spinner("Gemini is writing your resume..."):
+                summary_text = ""
+                if d.get("summary_raw", "").strip():
+                    b = polish_bullets(d["summary_raw"], "Professional Summary", client, MODEL)
+                    summary_text = " ".join(b)
+                polished_projects = []
+                for proj in d.get("projects_raw", []):
+                    if proj.get("name") and proj.get("desc"):
+                        b = polish_bullets(proj["desc"], f"Project: {proj['name']}", client, MODEL)
+                        polished_projects.append({"name": proj["name"], "tech": proj.get("tech",""), "bullets": b})
+                polished_exp = []
+                for exp in d.get("experience_raw", []):
+                    if exp.get("role") and exp.get("desc"):
+                        b = polish_bullets(exp["desc"], f"Role: {exp['role']}", client, MODEL)
+                        polished_exp.append({"role": exp["role"], "company": exp.get("company",""), "duration": exp.get("duration",""), "bullets": b})
+                sk = d.get("skills_raw", {})
+                skills_dict = {}
+                if sk.get("languages"): skills_dict["Languages"] = [s.strip() for s in sk["languages"].split(",") if s.strip()]
+                if sk.get("frameworks"): skills_dict["Frameworks"] = [s.strip() for s in sk["frameworks"].split(",") if s.strip()]
+                if sk.get("tools"): skills_dict["Tools"] = [s.strip() for s in sk["tools"].split(",") if s.strip()]
+                if sk.get("soft"): skills_dict["Soft Skills"] = [s.strip() for s in sk["soft"].split(",") if s.strip()]
+                final_data = {"personal": d.get("personal", {}), "summary": summary_text, "education": d.get("education", []),
+                              "projects": polished_projects, "experience": polished_exp, "skills": skills_dict}
+                pdf_bytes = generate_resume_pdf(final_data)
+                log_activity(username, "resume_builder")
+            st.success("Resume generated!")
+            pname = d.get("personal",{}).get("name","resume").replace(" ","_")
+            col_pdf, col_word = st.columns(2)
+            with col_pdf:
+                 st.download_button("📥 Download as PDF", data=pdf_bytes, file_name=f"{pname}_resume.pdf", mime="application/pdf", type="primary")
+            with col_word:
+                 
+                 docx_bytes = generate_resume_docx(final_data)
+                 st.download_button("📄 Download as Word", data=docx_bytes, file_name=f"{pname}_resume.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", type="primary")
+        if st.button("← Back"):
+            st.session_state["rb_step"] = 4
+            st.rerun()
+        if st.button("Start Over"):
+            for key in ["rb_step","rb_data"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()

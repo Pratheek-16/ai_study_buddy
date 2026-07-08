@@ -31,6 +31,20 @@ html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
 
 #MainMenu, footer, header { visibility: hidden; }
 
+/* ── Always show sidebar collapse/expand toggle ───────────────── */
+/* Always show sidebar toggle arrow */
+/* Hide sidebar collapse arrow so it can never be accidentally hidden */
+/* Hide the collapse button */
+[data-testid="stSidebarCollapseButton"] {
+    display: none !important;
+}
+
+/* Prevent sidebar from collapsing */
+section[data-testid="stSidebar"] {
+    min-width: 300px !important;
+    max-width: 300px !important;
+}
+
 /* ── Typography ───────────────────────────────────────────── */
 h1, h2, h3 {
     font-family: 'Source Serif 4', serif !important;
